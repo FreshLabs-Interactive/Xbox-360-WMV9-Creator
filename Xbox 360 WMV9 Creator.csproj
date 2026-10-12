@@ -2,7 +2,8 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net9.0-windows</TargetFramework>
+    <!-- The Windows 10 TFM is required for the Windows.Media.Transcoding (WMV9 encoder) APIs. -->
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
     <RootNamespace>XboxWMVCreator</RootNamespace>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -14,6 +15,24 @@
     <Description>Creates WMV9 videos from any format.</Description>
     <Copyright>FreshLabs Interactive ©2025</Copyright>
     <PackageIcon>X360WMV.png</PackageIcon>
+  </PropertyGroup>
+
+  <!--
+    Release build / "dotnet publish -c Release" produces ONE self-contained .exe that runs on any
+    64-bit Windows 10 (2004+) PC without installing .NET. Debug builds are unaffected, so F5 stays fast.
+    Output: bin\Release\net9.0-windows10.0.19041.0\win-x64\publish\
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <!-- WPF's native DLLs have to be bundled too, or the single file won't start. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- Don't ship the localized WPF resource folders for ~12 other languages, and no .pdb. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <!-- WPF does not support trimming; leave PublishTrimmed off. -->
   </PropertyGroup>
 
   <ItemGroup>

@@ -1,0 +1,13 @@
+<Window x:Class="XboxWMVCreator.SetupWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="First-Time Setup" Width="420" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize" ShowInTaskbar="False">
+    <StackPanel Margin="20">
+        <TextBlock Text="Downloading required tools" FontSize="16" FontWeight="Bold" Margin="0,0,0,4" />
+        <TextBlock Text="This only happens the first time you run the app." Foreground="Gray" Margin="0,0,0,16" />
+        <ProgressBar Name="DownloadProgressBar" Height="20" Minimum="0" Maximum="100" />
+        <TextBlock Name="StatusText" Text="Starting..." TextWrapping="Wrap" Margin="0,8,0,16" />
+        <Button Name="QuitButton" Content="Quit" Width="80" HorizontalAlignment="Right" Click="QuitButton_Click" />
+    </StackPanel>
+</Window>

@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using Microsoft.Win32;
@@ -12,21 +13,64 @@ namespace XboxWMVCreator
     {
         private List<string> conversionQueue = new List<string>();
         private ConversionWindow conversionWindow;
-        private const string FfmpegUrl = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip";
-        private const string YtdlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-        private string appFolder = AppDomain.CurrentDomain.BaseDirectory;
-        private string ffmpegPath => Path.Combine(appFolder, "ffmpeg.exe");
-        private string ytdlpPath => Path.Combine(appFolder, "yt-dlp.exe");
-        
+        // The folder the .exe itself lives in. ProcessPath is used first so this stays correct for the
+        // single-file publish (where files extracted at startup must not be mistaken for the app folder).
+        private string appFolder =
+            Path.GetDirectoryName(Environment.ProcessPath) is { Length: > 0 } processDir
+                ? processDir
+                : AppDomain.CurrentDomain.BaseDirectory;
+        private string ffmpegPath => DependencyDownloader.FfmpegPath(appFolder);
+        private string ytdlpPath => DependencyDownloader.YtdlpPath(appFolder);
+        private string TempFolder => Path.Combine(appFolder, "temp");
+
         public MainWindow()
         {
             InitializeComponent();
-            CheckDependencies();
 
+            // Fill the Output Settings dropdown and restore the user's last choice. The change handler is
+            // attached afterwards so that setting the initial selection doesn't trigger a needless save.
+            PresetComboBox.ItemsSource = OutputPreset.All;
+            PresetComboBox.SelectedItem = OutputPreset.FromId(Properties.Settings.Default.OutputPreset);
+            PresetComboBox.SelectionChanged += PresetComboBox_SelectionChanged;
 
+            Loaded += MainWindow_Loaded;
+            Closed += (s, e) => CleanupTempFolder();
         }
 
-       
+        private void PresetComboBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (PresetComboBox.SelectedItem is not OutputPreset preset)
+                return;
+
+            try
+            {
+                Properties.Settings.Default.OutputPreset = preset.Id;
+                Properties.Settings.Default.Save();
+            }
+            catch
+            {
+                // Not being able to remember the choice shouldn't stop anyone from converting.
+            }
+        }
+
+        private void MainWindow_Loaded(object sender, RoutedEventArgs e)
+        {
+            Loaded -= MainWindow_Loaded;
+
+            // The download queue only lives in memory, so anything left in "temp" is from an earlier
+            // session. Clear it so those files can't show up in a new download's queue.
+            CleanupTempFolder();
+
+            if (DependencyDownloader.AllPresent(appFolder))
+                return;
+
+            // First run: ffmpeg.exe and/or yt-dlp.exe are missing. ShowDialog() blocks the main
+            // window until the downloads finish, so the app can't be used without them.
+            var setup = new SetupWindow(appFolder) { Owner = this };
+            if (setup.ShowDialog() != true)
+                Application.Current.Shutdown();
+        }
+
 
         private void SelectFileButton_Click(object sender, RoutedEventArgs e)
         {
@@ -52,7 +96,7 @@ namespace XboxWMVCreator
             if (string.IsNullOrWhiteSpace(url))
                 return;
 
-            string tempFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "temp");
+            string tempFolder = TempFolder;
             Directory.CreateDirectory(tempFolder);
 
             string outputPath = Path.Combine(tempFolder, "%(title)s.%(ext)s");
@@ -79,6 +123,9 @@ namespace XboxWMVCreator
 
             foreach (var file in Directory.GetFiles(tempFolder))
             {
+                if (conversionQueue.Contains(file))
+                    continue; // already queued from an earlier download
+
                 conversionQueue.Add(file);
                 QueueListBox.Items.Add(file);
             }
@@ -96,86 +143,111 @@ namespace XboxWMVCreator
                 return;
             }
 
+            var convertButton = sender as System.Windows.Controls.Button;
+
+            // Lock the controls while converting: a second run over the same queue, or a different
+            // setting picked halfway through, would only cause confusion.
+            if (convertButton != null)
+                convertButton.IsEnabled = false;
+            PresetComboBox.IsEnabled = false;
+
+            try
+            {
+                await ConvertQueueAsync(PresetComboBox.SelectedItem as OutputPreset ?? OutputPreset.Default);
+            }
+            finally
+            {
+                if (convertButton != null)
+                    convertButton.IsEnabled = true;
+                PresetComboBox.IsEnabled = true;
+            }
+        }
+
+        private async Task ConvertQueueAsync(OutputPreset preset)
+        {
             conversionWindow = new ConversionWindow();
             conversionWindow.Show();
 
-            int total = conversionQueue.Count;
+            // Iterate a copy so removing items from the queue mid-run can't break the loop.
+            var files = conversionQueue.ToList();
+            int total = files.Count;
             int count = 0;
+            var succeeded = new List<string>();
+            var failed = new List<string>();
 
-            foreach (var inputFile in conversionQueue)
+            foreach (var inputFile in files)
             {
                 count++;
-                conversionWindow.UpdateProgress($"Converting ({count}/{total}): {Path.GetFileName(inputFile)}");
+                string label = $"Converting ({count}/{total}): {Path.GetFileName(inputFile)}";
+                conversionWindow.UpdateProgress(label);
 
                 try
                 {
-                    await ConvertToWMV(inputFile);
+                    await ConvertToWMV(inputFile, preset, status =>
+                        conversionWindow.UpdateProgress($"{label} - {status}"));
+
+                    succeeded.Add(inputFile);
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"Error converting {Path.GetFileName(inputFile)}:\n{ex.Message}");
+                    failed.Add($"{Path.GetFileName(inputFile)}: {ex.Message}");
                 }
             }
+
+            // Everything downloaded from YouTube lives in "temp"; the batch is finished, so remove it.
+            CleanupTempFolder();
 
             conversionWindow.Close();
             conversionQueue.Clear();
             QueueListBox.Items.Clear();
 
-            MessageBox.Show("All files converted!");
-
-            string doneFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "done");
-            
-            if (Properties.Settings.Default.AutoOpenFolder)
+            if (failed.Count == 0)
             {
-                Process.Start("explorer.exe", doneFolder);
+                MessageBox.Show($"All {succeeded.Count} file(s) converted ({preset.Label}).");
+            }
+            else
+            {
+                MessageBox.Show(
+                    $"{succeeded.Count} of {total} file(s) converted ({preset.Label}).\n\nFailed:\n" + string.Join("\n\n", failed),
+                    "Conversion finished with errors");
+            }
+
+            if (succeeded.Count > 0 && Properties.Settings.Default.AutoOpenFolder)
+            {
+                OpenDoneFolder();
             }
         }
 
-        private async Task ConvertToWMV(string inputFile)
+        private string DoneFolder => Path.Combine(appFolder, "done");
+
+        private async Task ConvertToWMV(string inputFile, OutputPreset preset, Action<string>? status = null)
         {
-            string doneFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "done");
-            Directory.CreateDirectory(doneFolder);
+            string outputFile = Path.Combine(DoneFolder, Path.GetFileNameWithoutExtension(inputFile) + ".wmv");
 
-            string outputFile = Path.Combine(doneFolder, Path.GetFileNameWithoutExtension(inputFile) + ".wmv");
+            // Work files (FFmpeg-prepared intermediate) go in the system temp folder, NOT the "temp" folder
+            // yt-dlp downloads into, so they can never delete queued downloads.
+            string workFolder = Path.Combine(Path.GetTempPath(), "X360WMV9");
 
-            var processInfo = new ProcessStartInfo
+            await Wmv9Converter.ConvertAsync(inputFile, outputFile, ffmpegPath, workFolder, preset, status);
+        }
+
+        private void OpenDoneFolder()
+        {
+            Directory.CreateDirectory(DoneFolder);
+
+            // The path must be quoted: if the app lives in a folder with spaces, an unquoted
+            // path makes Explorer open the wrong location.
+            Process.Start(new ProcessStartInfo
             {
-                FileName = ffmpegPath,
-                Arguments = $"-i \"{inputFile}\" -c:v wmv3 -b:v 3000k -threads 0 -s 1280x720 -c:a wmav2 \"{outputFile}\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            using (var process = new Process { StartInfo = processInfo, EnableRaisingEvents = true })
-            {
-                process.Start();
-
-                await Task.WhenAll(
-                    process.StandardOutput.ReadToEndAsync(),
-                    process.StandardError.ReadToEndAsync()
-                );
-
-                await process.WaitForExitAsync();
-            }
-            
-            CleanupTempFolder();
+                FileName = "explorer.exe",
+                Arguments = $"\"{DoneFolder}\"",
+                UseShellExecute = true
+            });
         }
 
         private void ViewOutputFolderButton_Click(object sender, RoutedEventArgs e)
         {
-            string doneFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "done");
-
-            if (!Directory.Exists(doneFolder))
-                Directory.CreateDirectory(doneFolder);
-
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                Arguments = $"\"{doneFolder}\"",
-                UseShellExecute = true
-            });
+            OpenDoneFolder();
         }
 
         private void RemoveFromQueue_Click(object sender, RoutedEventArgs e)
@@ -189,60 +261,19 @@ namespace XboxWMVCreator
             }
         }
 
-        private async void CheckDependencies()
-        {
-            if (!File.Exists(ffmpegPath))
-            {
-                MessageBox.Show("FFmpeg not found. Downloading...");
-                await DownloadAndExtractFfmpeg();
-            }
-
-            if (!File.Exists(ytdlpPath))
-            {
-                MessageBox.Show("yt-dlp not found. Downloading...");
-                await DownloadFile(YtdlpUrl, ytdlpPath);
-            }
-        }
-
-        private async Task DownloadFile(string url, string outputPath)
-        {
-            using (var client = new System.Net.Http.HttpClient())
-            {
-                var data = await client.GetByteArrayAsync(url);
-                await File.WriteAllBytesAsync(outputPath, data);
-            }
-        }
-
-        private async Task DownloadAndExtractFfmpeg()
-        {
-            string tempZip = Path.Combine(appFolder, "ffmpeg.zip");
-
-            await DownloadFile(FfmpegUrl, tempZip);
-
-            System.IO.Compression.ZipFile.ExtractToDirectory(tempZip, appFolder);
-
-            // Find the actual ffmpeg.exe inside extracted folders
-            string ffmpegRealPath = Directory.GetFiles(appFolder, "ffmpeg.exe", SearchOption.AllDirectories).FirstOrDefault();
-            if (!string.IsNullOrEmpty(ffmpegRealPath))
-            {
-                File.Copy(ffmpegRealPath, ffmpegPath, true);
-            }
-
-            File.Delete(tempZip);
-        }
+        // Deletes the "temp" folder that yt-dlp downloads into (the folder itself, not just its files).
+        // Retries briefly because antivirus or Explorer can hold a file open for a moment.
         private void CleanupTempFolder()
         {
-            string tempFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "temp");
-
-            if (Directory.Exists(tempFolder))
+            for (int attempt = 0; attempt < 3 && Directory.Exists(TempFolder); attempt++)
             {
                 try
                 {
-                    Directory.Delete(tempFolder, true); // true = recursive delete
+                    Directory.Delete(TempFolder, true);
                 }
-                catch 
+                catch
                 {
-                    //silent
+                    System.Threading.Thread.Sleep(200);
                 }
             }
         }

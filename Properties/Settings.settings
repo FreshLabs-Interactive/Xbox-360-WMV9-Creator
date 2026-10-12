@@ -14,5 +14,8 @@
     <Setting Name="OutputFormat" Type="System.String" Scope="User">
       <Value Profile="(Default)">wmv</Value>
     </Setting>
+    <Setting Name="OutputPreset" Type="System.String" Scope="User">
+      <Value Profile="(Default)">720p30</Value>
+    </Setting>
   </Settings>
 </SettingsFile>

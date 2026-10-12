@@ -70,5 +70,17 @@ namespace XboxWMVCreator.Properties {
                 this["OutputFormat"] = value;
             }
         }
+
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("720p30")]
+        public string OutputPreset {
+            get {
+                return ((string)(this["OutputPreset"]));
+            }
+            set {
+                this["OutputPreset"] = value;
+            }
+        }
     }
 }
